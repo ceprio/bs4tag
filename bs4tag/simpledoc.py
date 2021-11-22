@@ -9,7 +9,7 @@ from typing import Set
 from typing import Tuple
 from typing import Union
 from typing import cast
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup, NavigableString, CData
 
 
 class DocError(Exception):
@@ -39,7 +39,7 @@ class SimpleDoc(object):
             self.doc = doc
             self.name = name
             self.attrs = attrs
-            self.bs4_tag = doc.result.new_tag(name)
+            self.bs4_tag = doc.soup.new_tag(name)
 
         def  _append(self, *args, **kwargs):
             self.bs4_tag.append(*args, **kwargs)
@@ -49,7 +49,7 @@ class SimpleDoc(object):
             self.parent_tag = self.doc.current_tag
             self.doc.current_tag = self
             self.parent_tag._append(self.bs4_tag)
-            # ! self.position = len(self.doc.result)
+            # ! self.position = len(self.doc.soup)
             # ! self.doc._append('')  # put paceholder at this position
 
         def __exit__(self, tpe, value, traceback):
@@ -57,12 +57,12 @@ class SimpleDoc(object):
             if value is None:
                 if self.attrs:
                     self.bs4_tag.attrs.update(self.attrs)
-                #     self.doc.result[self.position] = "<%s %s>" % (
+                #     self.doc.soup[self.position] = "<%s %s>" % (
                 #         self.name,
                 #         dict_to_attrs(self.attrs),
                 #     )
                 # else:
-                #     self.doc.result[self.position] = "<%s>" % self.name
+                #     self.doc.soup[self.position] = "<%s>" % self.name
                 # ! self.doc._append("</%s>" % self.name)
                 self.doc.current_tag = self.parent_tag
 
@@ -79,7 +79,7 @@ class SimpleDoc(object):
             pass
 
         def  _append(self, *args, **kwargs):
-            self.doc.result.append(*args, **kwargs)
+            self.doc.soup.append(*args, **kwargs)
 
         def __getattr__(self, item):
             # type: (str) -> Any
@@ -87,11 +87,12 @@ class SimpleDoc(object):
 
     _newline_rgx = re.compile(r'\r?\n')
 
-    def __init__(self, *args, stag_end=' />', nl2br=False, **kwargs):
+    def __init__(self, *args, nl2br=False, **kwargs):
         # type: (str, bool) -> None
         r"""
         Initialisation uses the same arguments as Beautifulsoup
         """
+        assert "stag_end" not in kwargs, "stag_end not supported by bs4tag (or BS4)"
         self.features = args[1] if 1 < len(args) else kwargs.get('features', None)
         if self.features is None or len(self.features) == 0:
             self.features = "lxml"
@@ -100,11 +101,8 @@ class SimpleDoc(object):
         else:
             kwargs['features'] = self.features
 
-        self.result = BeautifulSoup(*args, **kwargs)
+        self.soup = BeautifulSoup(*args, **kwargs)
         self.current_tag = self.__class__.DocumentRoot(self)
-        assert stag_end in (' />', '/>', '>')
-        self._stag_end = stag_end
-        self._br = '<br' + stag_end
         self._nl2br = nl2br
 
     def tag(self, tag_name, *args, **kwargs):
@@ -158,7 +156,7 @@ class SimpleDoc(object):
 
         New lines ('\n' or '\r\n' sequences) are left intact, unless you have set the
         nl2br option to True when creating the SimpleDoc instance. Then they would be
-        replaced with `<br />` tags (or `<br>` tags if using the `stag_end` option
+        replaced with `<br/>` tags option
         of the SimpleDoc constructor as shown in the example below).
 
         Example::
@@ -173,15 +171,25 @@ class SimpleDoc(object):
             >>> doc.getvalue()
             'pistachio<br />ice cream'
 
-            >>> doc = SimpleDoc(nl2br=True, stag_end='>')
+            >>> doc = SimpleDoc(nl2br=True)
             >>> doc.text('pistachio\nice cream')
             >>> doc.getvalue()
             'pistachio<br>ice cream'
 
         """
         for strg in strgs:
-            transformed_string = NavigableString(html_escape(strg))
-            self.current_tag._append(transformed_string)
+            # ! transformed_string = html_escape(strg)
+            if self._nl2br:
+                strgs = \
+                    self.__class__._newline_rgx.split(
+                        strg
+                    )
+                for s in strgs[:-1]:
+                    self.current_tag._append(NavigableString(s))
+                    self.stag('br')
+                self.current_tag._append(NavigableString(strgs[-1]))
+            else:
+                self.current_tag._append(NavigableString(strg))
 
     def line(self, tag_name, text_content, *args, **kwargs):
         # type: (str, str, Tuple[str, Union[str, int, float]], Union[str, int, float]) -> None
@@ -324,17 +332,9 @@ class SimpleDoc(object):
             # appends <img src="/salmon-plays-piano.jpg" /> to the document
 
         If you want to produce self closing tags without the ending slash (HTML5 style),
-        use the stag_end parameter of the SimpleDoc constructor at the creation of the
-        SimpleDoc instance.
-
-        Example::
-
-            >>> doc = SimpleDoc(stag_end = '>')
-            >>> doc.stag('br')
-            >>> doc.getvalue()
-            '<br>'
+        it may not be possible to do under BS4.
         """
-        new_tag = self.result.new_tag(tag_name)
+        new_tag = self.soup.new_tag(tag_name)
         if args or kwargs:
             new_tag.attrs.update(dict_to_attrs(_attributes(args, kwargs)))
         new_tag.can_be_empty_element = True
@@ -353,19 +353,29 @@ class SimpleDoc(object):
         If you're sure your string does not contain ']]>', you can pass `safe = True`.
         If you do that, your string won't be searched for ']]>' sequences.
         """
-        self._append('<![CDATA[')
         if safe:
-            self._append(strg)
+            cdata = CData(strg)
+            self.current_tag._append(cdata)
         else:
-            self._append(strg.replace(']]>', ']]]]><![CDATA[>'))
-        self._append(']]>')
+            strgs = strg.split("]]>")
+            l = len(strgs)
+            for i, s in enumerate(strgs):
+                if i == 0 and l == 1:
+                    cdata = CData(s)
+                elif i == 0:
+                    cdata = CData(f"{s}]]")
+                elif i == l - 1:
+                    cdata = CData(f">{s}")
+                else:
+                    cdata = CData(f">{s}]]")
+                self.current_tag._append(cdata)
 
     def getvalue(self):
         # type: () -> str
         """
         returns the whole document as a single string
         """
-        return str(self.result)
+        return str(self.soup)
 
     def tagtext(self):
         # type: () -> Tuple[SimpleDoc, Any, Any]
@@ -521,7 +531,7 @@ def attr_escape(s):
         )
 
 
-ATTR_NO_VALUE = object()
+ATTR_NO_VALUE = None
 
 
 def dict_to_attrs(dct):

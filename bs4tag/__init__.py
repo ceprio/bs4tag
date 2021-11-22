@@ -58,5 +58,5 @@ __author__ = "Benjamin Le Forestier (benjamin@leforestier.org) with changes by c
 __version__ = '0.1.0'
 
 from .simpledoc import SimpleDoc
-# from yattag.doc import Doc
-# from yattag.indentation import indent, NO, FIRST_LINE, EACH_LINE
+from .doc import Doc
+# from .indentation import indent, NO, FIRST_LINE, EACH_LINE
